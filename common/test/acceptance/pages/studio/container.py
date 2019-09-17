@@ -19,7 +19,7 @@ class ContainerPage(PageObject, HelpMixin):
     """
     NAME_SELECTOR = '.page-header-title'
     NAME_INPUT_SELECTOR = '.page-header .xblock-field-input'
-    NAME_FIELD_WRAPPER_SELECTOR = '.page-header .wrapper-xblock-field'
+    NAME_FIELD_WRAPPER_SELECTOR = '.wrapper-xblock-field'
     ADD_MISSING_GROUPS_SELECTOR = '.notification-action-button[data-notification-action="add-missing-groups"]'
 
     def __init__(self, browser, locator):
