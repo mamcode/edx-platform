@@ -91,6 +91,7 @@ class CourseTeamSerializer(serializers.ModelSerializer):
             "language",
             "last_activity_at",
             "membership",
+            "FERPA_protected",
         )
         read_only_fields = ("course_id", "date_created", "discussion_topic_id", "last_activity_at")
 
@@ -109,6 +110,7 @@ class CourseTeamCreationSerializer(serializers.ModelSerializer):
             "topic_id",
             "country",
             "language",
+            "FERPA_protected",
         )
 
     def create(self, validated_data):
@@ -119,6 +121,7 @@ class CourseTeamCreationSerializer(serializers.ModelSerializer):
             topic_id=validated_data.get("topic_id", ''),
             country=validated_data.get("country", ''),
             language=validated_data.get("language", ''),
+            FERPA_protected=validated_data.get("FERPA_protected")
         )
         team.save()
         return team

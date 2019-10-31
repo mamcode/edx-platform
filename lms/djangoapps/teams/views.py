@@ -26,6 +26,7 @@ from rest_framework.reverse import reverse
 from rest_framework.views import APIView
 from rest_framework_oauth.authentication import OAuth2Authentication
 
+from course_modes.models import CourseMode
 from lms.djangoapps.courseware.courses import get_course_with_access, has_access
 from lms.djangoapps.discussion.django_comment_client.utils import has_discussion_privileges
 from lms.djangoapps.teams.models import CourseTeam, CourseTeamMembership
@@ -207,6 +208,16 @@ class TeamsDashboardView(GenericAPIView):
         # (where "results" is set to the value of the original list)
         return paginator.get_paginated_response(serializer.data).data
 
+def is_course_admin(user, course_key):
+    """
+    Returns True if the user is an admin for the course, else returns False
+    """
+    if user.is_staff:
+        return True
+    if CourseStaffRole(course_key).has_user(user):
+        return True
+    return False
+
 
 def has_team_api_access(user, course_key, access_username=None):
     """Returns True if the user has access to the Team API for the course
@@ -221,15 +232,40 @@ def has_team_api_access(user, course_key, access_username=None):
     Returns:
       bool: True if the user has access, False otherwise.
     """
-    if user.is_staff:
-        return True
-    if CourseStaffRole(course_key).has_user(user):
+    if is_course_admin(user, course_key):
         return True
     if has_discussion_privileges(user, course_key):
         return True
     if not access_username or access_username == user.username:
         return CourseEnrollment.is_enrolled(user, course_key)
     return False
+
+
+def enrollment_is_FERPA_protected(user, course_key):
+    """
+        Returns True if the user's enrollment with the course is of 
+        Masters mode or other institution intiated enrollment modes. If
+        the enrollment mode is of "verified" or "audit", then return False
+    """
+    try:
+        enrollment = CourseEnrollment.get_enrollment(user, course_key)
+        return enrollment.mode == CourseMode.MASTERS
+    except Exception as e:
+        log.info("Unable to get student [%s] course [%s] enrollment", user.id, course_key)
+        return False
+
+
+def has_specific_team_access(user, team):
+    """
+    Check whether the user have access to the specific team.
+    The user can be of a different FERPA protection bubble with the team in question.
+    If user is not in the same FERPA bubble with the team, return False.
+    Else, return True.
+    """
+    if is_course_admin(user, team.course_key):
+        return True
+    is_user_FERPA_protected = enrollment_is_FERPA_protected(user, team.course_key)
+    return is_user_FERPA_protected == team.FERPA_protected
 
 
 class TeamsListView(ExpandableFieldViewMixin, GenericAPIView):
@@ -411,6 +447,14 @@ class TeamsListView(ExpandableFieldViewMixin, GenericAPIView):
                 )
                 return Response(error, status=status.HTTP_400_BAD_REQUEST)
             result_filter.update({'topic_id': topic_id})
+
+        if not is_course_admin(request.user, course_key):
+            is_requester_FERPA_protected = enrollment_is_FERPA_protected(
+                    request.user,
+                    course_key
+                )
+            result_filter.update({'FERPA_protected': is_requester_FERPA_protected})
+
         if text_search and CourseTeamIndexer.search_is_enabled():
             try:
                 search_engine = CourseTeamIndexer.engine()
@@ -507,6 +551,9 @@ class TeamsListView(ExpandableFieldViewMixin, GenericAPIView):
 
         data = request.data.copy()
         data['course_id'] = six.text_type(course_key)
+
+        is_requester_FERPA_protected = enrollment_is_FERPA_protected(request.user, course_key)
+        data['FERPA_protected'] = is_requester_FERPA_protected
 
         serializer = CourseTeamCreationSerializer(data=data)
         add_serializer_errors(serializer, data, field_errors)
@@ -618,6 +665,9 @@ class TeamsDetailView(ExpandableFieldViewMixin, RetrievePatchAPIView):
 
                 * last_activity_at: The date of the last activity of any team member
                   within the team.
+
+                * FERPA_protected: Whether the team consist of team members in 
+                  FERPA protected groups
 
             For all text fields, clients rendering the values should take care
             to HTML escape them to avoid script injections, as the data is
@@ -1050,6 +1100,8 @@ class MembershipListView(ExpandableFieldViewMixin, GenericAPIView):
                 return Response(status=status.HTTP_400_BAD_REQUEST)
             if not has_team_api_access(request.user, team.course_id):
                 return Response(status=status.HTTP_404_NOT_FOUND)
+            if not has_specific_team_access(request.user, team):
+                return Response(status=Status.HTTP_403_FORBIDDEN)
 
         if 'username' in request.query_params:
             specified_username_or_team = True
@@ -1105,6 +1157,9 @@ class MembershipListView(ExpandableFieldViewMixin, GenericAPIView):
         username = request.data['username']
         if not has_team_api_access(request.user, team.course_id, access_username=username):
             return Response(status=status.HTTP_404_NOT_FOUND)
+
+        if not has_specific_team_access(request.user, team):
+            return Response(status=status.HTTP_403_FORBIDDEN)
 
         try:
             user = User.objects.get(username=username)
@@ -1243,6 +1298,9 @@ class MembershipDetailView(ExpandableFieldViewMixin, GenericAPIView):
         team = self.get_team(team_id)
         if not has_team_api_access(request.user, team.course_id):
             return Response(status=status.HTTP_404_NOT_FOUND)
+        
+        if not has_specific_team_access(request.user, team):
+            return Response(status=status.HTTP_403_FORBIDDEN)
 
         membership = self.get_membership(username, team)
 
@@ -1252,21 +1310,24 @@ class MembershipDetailView(ExpandableFieldViewMixin, GenericAPIView):
     def delete(self, request, team_id, username):
         """DELETE /api/team/v0/team_membership/{team_id},{username}"""
         team = self.get_team(team_id)
-        if has_team_api_access(request.user, team.course_id, access_username=username):
-            membership = self.get_membership(username, team)
-            removal_method = 'self_removal'
-            if 'admin' in request.query_params:
-                removal_method = 'removed_by_admin'
-            membership.delete()
-            emit_team_event(
-                'edx.team.learner_removed',
-                team.course_id,
-                {
-                    'team_id': team.team_id,
-                    'user_id': membership.user.id,
-                    'remove_method': removal_method
-                }
-            )
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        else:
+        if not has_team_api_access(request.user, team.course_id, access_username=username):
             return Response(status=status.HTTP_404_NOT_FOUND)
+        
+        if not has_specific_team_access(request.user, team):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        membership = self.get_membership(username, team)
+        removal_method = 'self_removal'
+        if 'admin' in request.query_params:
+            removal_method = 'removed_by_admin'
+        membership.delete()
+        emit_team_event(
+            'edx.team.learner_removed',
+            team.course_id,
+            {
+                'team_id': team.team_id,
+                'user_id': membership.user.id,
+                'remove_method': removal_method
+            }
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
