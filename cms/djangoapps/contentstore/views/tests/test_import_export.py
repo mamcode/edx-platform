@@ -1022,6 +1022,7 @@ class TestCourseExportImport(LibraryTestCase):
             publish_item
         )
 
+
 @ddt.ddt
 @override_settings(CONTENTSTORE=TEST_DATA_CONTENTSTORE)
 class TestCourseExportImportProblem(CourseTestCase):
