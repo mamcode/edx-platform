@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import logging
+import re
 
 from lxml import etree
 from xblock.fields import Scope, String
@@ -22,7 +23,12 @@ class RawMixin(object):
 
     @classmethod
     def definition_from_xml(cls, xml_object, system):
-        return {'data': etree.tostring(xml_object, pretty_print=True, encoding='unicode')}, []
+        pre_tag_data = [etree.tostring(pre_tag_info) for pre_tag_info in xml_object.findall('pre')]
+        data = etree.tostring(xml_object, pretty_print=True, encoding='unicode')
+        if pre_tag_data:
+            for index, pre_tag in enumerate(re.findall("<pre>[\s\S]*?</pre>", data)):
+                data = re.sub(re.escape(pre_tag), pre_tag_data[index], data)
+        return {'data': data}, []
 
     def definition_to_xml(self, resource_fs):
         """
